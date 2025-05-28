@@ -6,6 +6,52 @@ import os
 
 app = Flask(__name__)
 
+def preprocess_image(img):
+    # Converteer naar grijswaarden
+    gray = cv2.cvtColor(img, cv2.COLOR_BGR2GRAY)
+    
+    # Pas histogram equalization toe voor betere contrast
+    clahe = cv2.createCLAHE(clipLimit=2.0, tileGridSize=(8,8))
+    gray = clahe.apply(gray)
+    
+    # Ruisreductie
+    gray = cv2.GaussianBlur(gray, (5, 5), 0)
+    
+    return gray
+
+def find_good_matches(des1, des2, ratio_thresh=0.75):
+    # Gebruik BFMatcher met k=2 voor ratio test
+    bf = cv2.BFMatcher(cv2.NORM_HAMMING, crossCheck=False)
+    matches = bf.knnMatch(des1, des2, k=2)
+    
+    # Pas Lowe's ratio test toe
+    good_matches = []
+    for m, n in matches:
+        if m.distance < ratio_thresh * n.distance:
+            good_matches.append(m)
+    
+    return good_matches
+
+def verify_geometric_consistency(kp1, kp2, good_matches, min_matches=10):
+    if len(good_matches) < min_matches:
+        return False, 0
+    
+    # Haal de coördinaten van de matches
+    src_pts = np.float32([kp1[m.queryIdx].pt for m in good_matches]).reshape(-1, 1, 2)
+    dst_pts = np.float32([kp2[m.trainIdx].pt for m in good_matches]).reshape(-1, 1, 2)
+    
+    # Bereken de homografie
+    H, mask = cv2.findHomography(src_pts, dst_pts, cv2.RANSAC, 5.0)
+    
+    if H is None:
+        return False, 0
+    
+    # Tel hoeveel inliers we hebben
+    inliers = np.sum(mask)
+    inlier_ratio = inliers / len(good_matches)
+    
+    return inlier_ratio > 0.5, inlier_ratio
+
 @app.route('/')
 def hello():
     return 'Image Compare API is running ✅'
@@ -41,10 +87,24 @@ def compare_images():
         right_half_img1 = right_half_img1[:min_height, :]
         left_half_img2 = left_half_img2[:min_height, :]
 
-        # Gebruik de halve afbeeldingen voor de vergelijking
-        orb = cv2.ORB_create(nfeatures=2000)
-        kp1, des1 = orb.detectAndCompute(right_half_img1, None)
-        kp2, des2 = orb.detectAndCompute(left_half_img2, None)
+        # Pre-process de afbeeldingen
+        processed_img1 = preprocess_image(right_half_img1)
+        processed_img2 = preprocess_image(left_half_img2)
+
+        # Gebruik ORB met meer features en betere parameters
+        orb = cv2.ORB_create(
+            nfeatures=3000,
+            scaleFactor=1.2,
+            nlevels=8,
+            edgeThreshold=31,
+            firstLevel=0,
+            WTA_K=2,
+            patchSize=31,
+            fastThreshold=20
+        )
+        
+        kp1, des1 = orb.detectAndCompute(processed_img1, None)
+        kp2, des2 = orb.detectAndCompute(processed_img2, None)
 
         if des1 is None or des2 is None or len(des1) == 0 or len(des2) == 0:
             return jsonify({
@@ -53,16 +113,20 @@ def compare_images():
                 "remarks": "Geen kenmerken gevonden in een of beide afbeeldingen."
             })
 
-        bf = cv2.BFMatcher(cv2.NORM_HAMMING, crossCheck=True)
-        matches = bf.match(des1, des2)
-        matches = sorted(matches, key=lambda x: x.distance)
-        good_matches = [m for m in matches if m.distance < 50]
-        confidence = min(100, int((len(good_matches) / len(matches)) * 100)) if matches else 0
-
+        # Vind goede matches met ratio test
+        good_matches = find_good_matches(des1, des2)
+        
+        # Verifieer geometrische consistentie
+        is_geometrically_consistent, geometric_confidence = verify_geometric_consistency(kp1, kp2, good_matches)
+        
+        # Bereken de uiteindelijke confidence score
+        match_ratio = len(good_matches) / min(len(des1), len(des2))
+        final_confidence = int((match_ratio * 0.4 + geometric_confidence * 0.6) * 100)
+        
         result = {
-            "match": confidence > 30,
-            "confidence": confidence,
-            "remarks": f"{len(good_matches)} goede matches gevonden van totaal {len(matches)}."
+            "match": is_geometrically_consistent and final_confidence > 30,
+            "confidence": final_confidence,
+            "remarks": f"{len(good_matches)} goede matches gevonden. Geometrische consistentie: {int(geometric_confidence * 100)}%"
         }
         return jsonify(result)
     finally:
