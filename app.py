@@ -144,7 +144,7 @@ def find_good_matches(des1, des2, ratio_thresh=0.7):  # Aangepaste ratio thresho
     
     return good_matches
 
-def verify_geometric_consistency(kp1, kp2, good_matches, min_matches=8):  # Verminderd minimum matches
+def verify_geometric_consistency(kp1, kp2, good_matches, img_shape, min_matches=8):  # Verminderd minimum matches
     if len(good_matches) < min_matches:
         return False, 0
     
@@ -163,14 +163,39 @@ def verify_geometric_consistency(kp1, kp2, good_matches, min_matches=8):  # Verm
     inlier_ratio = inliers / len(good_matches)
     
     # Bereken de overlap score
-    overlap_score = analyze_match_distribution(kp1, kp2, good_matches, 
-                                             (max(kp1[0].size[1], kp2[0].size[1]),
-                                              max(kp1[0].size[0], kp2[0].size[0])))
+    overlap_score = analyze_match_distribution(kp1, kp2, good_matches, img_shape)
     
     # Combineer inlier ratio en overlap score
     final_score = (inlier_ratio * 0.6 + overlap_score * 0.4)
     
     return final_score > 0.3, final_score  # Aangepaste drempelwaarde
+
+def compare_images_v3(img1, img2):
+    """Vergelijk twee afbeeldingen met de originele versie van het algoritme"""
+    # Zorg ervoor dat beide afbeeldingen dezelfde grootte hebben
+    scale_percent = 100
+    width = int(img1.shape[1] * scale_percent / 100)
+    height = int(img1.shape[0] * scale_percent / 100)
+    dim = (width, height)
+    img1 = cv2.resize(img1, dim)
+    img2 = cv2.resize(img2, dim)
+
+    # Gebruik ORB met originele parameters
+    orb = cv2.ORB_create(nfeatures=2000)
+    kp1, des1 = orb.detectAndCompute(img1, None)
+    kp2, des2 = orb.detectAndCompute(img2, None)
+
+    if des1 is None or des2 is None or len(des1) == 0 or len(des2) == 0:
+        return False, 0
+
+    # Gebruik de originele matching strategie
+    bf = cv2.BFMatcher(cv2.NORM_HAMMING, crossCheck=True)
+    matches = bf.match(des1, des2)
+    matches = sorted(matches, key=lambda x: x.distance)
+    good_matches = [m for m in matches if m.distance < 50]
+    confidence = min(100, int((len(good_matches) / len(matches)) * 100)) if matches else 0
+
+    return confidence > 30, confidence
 
 @app.route('/')
 def hello():
@@ -205,62 +230,14 @@ def compare_images():
             # Log afbeeldingsgrootte
             app.logger.info(f"Image 1 size: {img1.shape}, Image 2 size: {img2.shape}")
 
-            # Bereken de helft van de breedte voor beide afbeeldingen
-            height1, width1 = img1.shape[:2]
-            height2, width2 = img2.shape[:2]
-            
-            # Neem de rechterhelft van de eerste afbeelding
-            right_half_img1 = img1[:, width1//2:]
-            # Neem de linkerhelft van de tweede afbeelding
-            left_half_img2 = img2[:, :width2//2]
-
-            # Zorg ervoor dat beide helften dezelfde hoogte hebben
-            min_height = min(right_half_img1.shape[0], left_half_img2.shape[0])
-            right_half_img1 = right_half_img1[:min_height, :]
-            left_half_img2 = left_half_img2[:min_height, :]
-
-            # Pre-process de afbeeldingen
-            processed_img1 = preprocess_image(right_half_img1)
-            processed_img2 = preprocess_image(left_half_img2)
-
-            # Gebruik ORB met verbeterde parameters
-            orb = cv2.ORB_create(
-                nfeatures=3000,  # Verhoogd aantal features
-                scaleFactor=1.15,  # Fijnere schaal
-                nlevels=12,  # Meer niveaus voor betere schaal-invariantie
-                edgeThreshold=31,
-                firstLevel=0,
-                WTA_K=2,
-                patchSize=31,
-                fastThreshold=15  # Verlaagd voor meer features
-            )
-            
-            kp1, des1 = orb.detectAndCompute(processed_img1, None)
-            kp2, des2 = orb.detectAndCompute(processed_img2, None)
-
-            if des1 is None or des2 is None or len(des1) == 0 or len(des2) == 0:
-                app.logger.warning("Geen kenmerken gevonden in een of beide afbeeldingen")
-                return jsonify({
-                    "match": False,
-                    "confidence": 0,
-                    "remarks": "Geen kenmerken gevonden in een of beide afbeeldingen."
-                })
-
-            # Vind goede matches met ratio test
-            good_matches = find_good_matches(des1, des2)
-            
-            # Verifieer geometrische consistentie
-            is_geometrically_consistent, geometric_confidence = verify_geometric_consistency(kp1, kp2, good_matches)
-            
-            # Bereken de uiteindelijke confidence score
-            match_ratio = len(good_matches) / min(len(des1), len(des2))
-            final_confidence = int((match_ratio * 0.3 + geometric_confidence * 0.7) * 100)  # Aangepaste gewichten
+            # Vergelijk de afbeeldingen
+            match_v3, confidence = compare_images_v3(img1, img2)
             
             # Converteer NumPy types naar Python native types
             result = {
-                "match": bool(is_geometrically_consistent and final_confidence > 25),  # Verlaagde drempelwaarde
-                "confidence": int(final_confidence),
-                "remarks": f"{len(good_matches)} goede matches gevonden. Geometrische consistentie: {int(geometric_confidence * 100)}%"
+                "match": bool(match_v3),
+                "confidence": int(confidence),
+                "remarks": f"Match confidence: {confidence}%"
             }
             
             app.logger.info(f"Successfully processed images. Result: {result}")
