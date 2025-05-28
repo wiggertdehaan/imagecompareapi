@@ -27,16 +27,31 @@ def compare_images():
         if img1 is None or img2 is None:
             return jsonify({'error': 'Kon een van de afbeeldingen niet lezen'}), 400
 
-        scale_percent = 100
-        width = int(img1.shape[1] * scale_percent / 100)
-        height = int(img1.shape[0] * scale_percent / 100)
-        dim = (width, height)
-        img1 = cv2.resize(img1, dim)
-        img2 = cv2.resize(img2, dim)
+        # Bereken de helft van de breedte voor beide afbeeldingen
+        height1, width1 = img1.shape[:2]
+        height2, width2 = img2.shape[:2]
+        
+        # Neem de rechterhelft van de eerste afbeelding
+        right_half_img1 = img1[:, width1//2:]
+        # Neem de linkerhelft van de tweede afbeelding
+        left_half_img2 = img2[:, :width2//2]
 
+        # Zorg ervoor dat beide helften dezelfde hoogte hebben
+        min_height = min(right_half_img1.shape[0], left_half_img2.shape[0])
+        right_half_img1 = right_half_img1[:min_height, :]
+        left_half_img2 = left_half_img2[:min_height, :]
+
+        # Gebruik de halve afbeeldingen voor de vergelijking
         orb = cv2.ORB_create(nfeatures=2000)
-        kp1, des1 = orb.detectAndCompute(img1, None)
-        kp2, des2 = orb.detectAndCompute(img2, None)
+        kp1, des1 = orb.detectAndCompute(right_half_img1, None)
+        kp2, des2 = orb.detectAndCompute(left_half_img2, None)
+
+        if des1 is None or des2 is None or len(des1) == 0 or len(des2) == 0:
+            return jsonify({
+                "match": False,
+                "confidence": 0,
+                "remarks": "Geen kenmerken gevonden in een of beide afbeeldingen."
+            })
 
         bf = cv2.BFMatcher(cv2.NORM_HAMMING, crossCheck=True)
         matches = bf.match(des1, des2)
