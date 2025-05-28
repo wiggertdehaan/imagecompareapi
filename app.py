@@ -168,9 +168,10 @@ def compare_images():
             match_ratio = len(good_matches) / min(len(des1), len(des2))
             final_confidence = int((match_ratio * 0.4 + geometric_confidence * 0.6) * 100)
             
+            # Converteer NumPy types naar Python native types
             result = {
-                "match": is_geometrically_consistent and final_confidence > 30,
-                "confidence": final_confidence,
+                "match": bool(is_geometrically_consistent and final_confidence > 30),  # Expliciet omzetten naar Python bool
+                "confidence": int(final_confidence),  # Expliciet omzetten naar Python int
                 "remarks": f"{len(good_matches)} goede matches gevonden. Geometrische consistentie: {int(geometric_confidence * 100)}%"
             }
             
