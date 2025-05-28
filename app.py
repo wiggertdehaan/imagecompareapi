@@ -31,40 +31,120 @@ def resize_if_needed(img, max_dimension=1500):
         return cv2.resize(img, (new_width, new_height))
     return img
 
+def enhance_contrast(img):
+    """Verbeter contrast met CLAHE op verschillende kanalen"""
+    if len(img.shape) == 2:  # Als het al grijswaarden is
+        clahe = cv2.createCLAHE(clipLimit=3.0, tileGridSize=(8,8))
+        return clahe.apply(img)
+    else:  # Voor kleurenafbeeldingen
+        lab = cv2.cvtColor(img, cv2.COLOR_BGR2LAB)
+        l, a, b = cv2.split(lab)
+        clahe = cv2.createCLAHE(clipLimit=3.0, tileGridSize=(8,8))
+        cl = clahe.apply(l)
+        enhanced = cv2.merge((cl,a,b))
+        return cv2.cvtColor(enhanced, cv2.COLOR_LAB2BGR)
+
+def detect_edges(img):
+    """Edge detection met Canny en Sobel"""
+    # Gaussian blur voor ruisreductie
+    blurred = cv2.GaussianBlur(img, (5, 5), 0)
+    
+    # Canny edge detection
+    edges_canny = cv2.Canny(blurred, 50, 150)
+    
+    # Sobel edge detection
+    sobelx = cv2.Sobel(blurred, cv2.CV_64F, 1, 0, ksize=3)
+    sobely = cv2.Sobel(blurred, cv2.CV_64F, 0, 1, ksize=3)
+    edges_sobel = np.sqrt(sobelx**2 + sobely**2)
+    edges_sobel = np.uint8(edges_sobel)
+    
+    # Combineer beide edge maps
+    edges = cv2.addWeighted(edges_canny, 0.7, edges_sobel, 0.3, 0)
+    return edges
+
 def preprocess_image(img):
     try:
         # Resize als nodig
         img = resize_if_needed(img)
         
+        # Verbeter contrast
+        img = enhance_contrast(img)
+        
         # Converteer naar grijswaarden
         gray = cv2.cvtColor(img, cv2.COLOR_BGR2GRAY)
         
-        # Pas histogram equalization toe voor betere contrast
-        clahe = cv2.createCLAHE(clipLimit=2.0, tileGridSize=(8,8))
-        gray = clahe.apply(gray)
+        # Edge detection
+        edges = detect_edges(gray)
         
-        # Ruisreductie
-        gray = cv2.GaussianBlur(gray, (5, 5), 0)
+        # Combineer grijswaarden en edges
+        combined = cv2.addWeighted(gray, 0.7, edges, 0.3, 0)
         
-        return gray
+        return combined
     except Exception as e:
         app.logger.error(f"Error in preprocess_image: {str(e)}")
         raise
 
-def find_good_matches(des1, des2, ratio_thresh=0.75):
-    # Gebruik BFMatcher met k=2 voor ratio test
-    bf = cv2.BFMatcher(cv2.NORM_HAMMING, crossCheck=False)
-    matches = bf.knnMatch(des1, des2, k=2)
+def analyze_match_distribution(kp1, kp2, good_matches, img_shape):
+    """Analyseer de verdeling van matches over de afbeelding"""
+    if not good_matches:
+        return 0.0
     
-    # Pas Lowe's ratio test toe
-    good_matches = []
-    for m, n in matches:
+    # Bereken de coördinaten van matches
+    src_pts = np.float32([kp1[m.queryIdx].pt for m in good_matches])
+    dst_pts = np.float32([kp2[m.trainIdx].pt for m in good_matches])
+    
+    # Bereken de afstanden tussen corresponderende punten
+    distances = np.linalg.norm(src_pts - dst_pts, axis=1)
+    
+    # Bereken de gemiddelde afstand
+    avg_distance = np.mean(distances)
+    
+    # Bereken de standaarddeviatie van de afstanden
+    std_distance = np.std(distances)
+    
+    # Bereken de overlap score (lager is beter)
+    overlap_score = avg_distance / (img_shape[0] * 0.1)  # Normaliseer op basis van afbeeldingshoogte
+    
+    # Bereken de consistentie score (lager is beter)
+    consistency_score = std_distance / avg_distance if avg_distance > 0 else 1.0
+    
+    return 1.0 - min(1.0, (overlap_score + consistency_score) / 2.0)
+
+def find_good_matches(des1, des2, ratio_thresh=0.7):  # Aangepaste ratio threshold
+    """Verbeterde feature matching met ratio test en symmetrie check"""
+    if des1 is None or des2 is None or len(des1) == 0 or len(des2) == 0:
+        return []
+    
+    # Forward matching
+    bf = cv2.BFMatcher(cv2.NORM_HAMMING, crossCheck=False)
+    matches_forward = bf.knnMatch(des1, des2, k=2)
+    
+    # Backward matching
+    matches_backward = bf.knnMatch(des2, des1, k=2)
+    
+    # Pas ratio test toe op beide richtingen
+    good_matches_forward = []
+    for m, n in matches_forward:
         if m.distance < ratio_thresh * n.distance:
-            good_matches.append(m)
+            good_matches_forward.append(m)
+    
+    good_matches_backward = []
+    for m, n in matches_backward:
+        if m.distance < ratio_thresh * n.distance:
+            good_matches_backward.append(m)
+    
+    # Symmetrie check
+    good_matches = []
+    for match in good_matches_forward:
+        # Zoek de corresponderende backward match
+        for back_match in good_matches_backward:
+            if match.queryIdx == back_match.trainIdx and match.trainIdx == back_match.queryIdx:
+                good_matches.append(match)
+                break
     
     return good_matches
 
-def verify_geometric_consistency(kp1, kp2, good_matches, min_matches=10):
+def verify_geometric_consistency(kp1, kp2, good_matches, min_matches=8):  # Verminderd minimum matches
     if len(good_matches) < min_matches:
         return False, 0
     
@@ -72,8 +152,8 @@ def verify_geometric_consistency(kp1, kp2, good_matches, min_matches=10):
     src_pts = np.float32([kp1[m.queryIdx].pt for m in good_matches]).reshape(-1, 1, 2)
     dst_pts = np.float32([kp2[m.trainIdx].pt for m in good_matches]).reshape(-1, 1, 2)
     
-    # Bereken de homografie
-    H, mask = cv2.findHomography(src_pts, dst_pts, cv2.RANSAC, 5.0)
+    # Bereken de homografie met RANSAC
+    H, mask = cv2.findHomography(src_pts, dst_pts, cv2.RANSAC, 3.0)  # Aangepaste RANSAC threshold
     
     if H is None:
         return False, 0
@@ -82,7 +162,15 @@ def verify_geometric_consistency(kp1, kp2, good_matches, min_matches=10):
     inliers = np.sum(mask)
     inlier_ratio = inliers / len(good_matches)
     
-    return inlier_ratio > 0.5, inlier_ratio
+    # Bereken de overlap score
+    overlap_score = analyze_match_distribution(kp1, kp2, good_matches, 
+                                             (max(kp1[0].size[1], kp2[0].size[1]),
+                                              max(kp1[0].size[0], kp2[0].size[0])))
+    
+    # Combineer inlier ratio en overlap score
+    final_score = (inlier_ratio * 0.6 + overlap_score * 0.4)
+    
+    return final_score > 0.3, final_score  # Aangepaste drempelwaarde
 
 @app.route('/')
 def hello():
@@ -135,16 +223,16 @@ def compare_images():
             processed_img1 = preprocess_image(right_half_img1)
             processed_img2 = preprocess_image(left_half_img2)
 
-            # Gebruik ORB met meer features en betere parameters
+            # Gebruik ORB met verbeterde parameters
             orb = cv2.ORB_create(
-                nfeatures=2000,  # Verminderd van 3000 naar 2000 voor betere performance
-                scaleFactor=1.2,
-                nlevels=8,
+                nfeatures=3000,  # Verhoogd aantal features
+                scaleFactor=1.15,  # Fijnere schaal
+                nlevels=12,  # Meer niveaus voor betere schaal-invariantie
                 edgeThreshold=31,
                 firstLevel=0,
                 WTA_K=2,
                 patchSize=31,
-                fastThreshold=20
+                fastThreshold=15  # Verlaagd voor meer features
             )
             
             kp1, des1 = orb.detectAndCompute(processed_img1, None)
@@ -166,12 +254,12 @@ def compare_images():
             
             # Bereken de uiteindelijke confidence score
             match_ratio = len(good_matches) / min(len(des1), len(des2))
-            final_confidence = int((match_ratio * 0.4 + geometric_confidence * 0.6) * 100)
+            final_confidence = int((match_ratio * 0.3 + geometric_confidence * 0.7) * 100)  # Aangepaste gewichten
             
             # Converteer NumPy types naar Python native types
             result = {
-                "match": bool(is_geometrically_consistent and final_confidence > 30),  # Expliciet omzetten naar Python bool
-                "confidence": int(final_confidence),  # Expliciet omzetten naar Python int
+                "match": bool(is_geometrically_consistent and final_confidence > 25),  # Verlaagde drempelwaarde
+                "confidence": int(final_confidence),
                 "remarks": f"{len(good_matches)} goede matches gevonden. Geometrische consistentie: {int(geometric_confidence * 100)}%"
             }
             
