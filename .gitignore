@@ -6,4 +6,5 @@ env/
 .venv/
 .env
 venv/
+images/
 logs/app.log
