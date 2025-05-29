@@ -21,181 +21,43 @@ app.logger.addHandler(file_handler)
 app.logger.setLevel(logging.INFO)
 app.logger.info('Image Compare API startup')
 
-def resize_if_needed(img, max_dimension=1500):
-    """Pas de afbeelding aan als deze te groot is"""
-    height, width = img.shape[:2]
-    if max(height, width) > max_dimension:
-        scale = max_dimension / max(height, width)
-        new_width = int(width * scale)
-        new_height = int(height * scale)
-        return cv2.resize(img, (new_width, new_height))
-    return img
-
-def enhance_contrast(img):
-    """Verbeter contrast met CLAHE op verschillende kanalen"""
-    if len(img.shape) == 2:  # Als het al grijswaarden is
-        clahe = cv2.createCLAHE(clipLimit=3.0, tileGridSize=(8,8))
-        return clahe.apply(img)
-    else:  # Voor kleurenafbeeldingen
-        lab = cv2.cvtColor(img, cv2.COLOR_BGR2LAB)
-        l, a, b = cv2.split(lab)
-        clahe = cv2.createCLAHE(clipLimit=3.0, tileGridSize=(8,8))
-        cl = clahe.apply(l)
-        enhanced = cv2.merge((cl,a,b))
-        return cv2.cvtColor(enhanced, cv2.COLOR_LAB2BGR)
-
-def detect_edges(img):
-    """Edge detection met Canny en Sobel"""
-    # Gaussian blur voor ruisreductie
-    blurred = cv2.GaussianBlur(img, (5, 5), 0)
-    
-    # Canny edge detection
-    edges_canny = cv2.Canny(blurred, 50, 150)
-    
-    # Sobel edge detection
-    sobelx = cv2.Sobel(blurred, cv2.CV_64F, 1, 0, ksize=3)
-    sobely = cv2.Sobel(blurred, cv2.CV_64F, 0, 1, ksize=3)
-    edges_sobel = np.sqrt(sobelx**2 + sobely**2)
-    edges_sobel = np.uint8(edges_sobel)
-    
-    # Combineer beide edge maps
-    edges = cv2.addWeighted(edges_canny, 0.7, edges_sobel, 0.3, 0)
-    return edges
-
-def preprocess_image(img):
-    try:
-        # Resize als nodig
-        img = resize_if_needed(img)
-        
-        # Verbeter contrast
-        img = enhance_contrast(img)
-        
-        # Converteer naar grijswaarden
-        gray = cv2.cvtColor(img, cv2.COLOR_BGR2GRAY)
-        
-        # Edge detection
-        edges = detect_edges(gray)
-        
-        # Combineer grijswaarden en edges
-        combined = cv2.addWeighted(gray, 0.7, edges, 0.3, 0)
-        
-        return combined
-    except Exception as e:
-        app.logger.error(f"Error in preprocess_image: {str(e)}")
-        raise
-
-def analyze_match_distribution(kp1, kp2, good_matches, img_shape):
-    """Analyseer de verdeling van matches over de afbeelding"""
-    if not good_matches:
-        return 0.0
-    
-    # Bereken de coördinaten van matches
-    src_pts = np.float32([kp1[m.queryIdx].pt for m in good_matches])
-    dst_pts = np.float32([kp2[m.trainIdx].pt for m in good_matches])
-    
-    # Bereken de afstanden tussen corresponderende punten
-    distances = np.linalg.norm(src_pts - dst_pts, axis=1)
-    
-    # Bereken de gemiddelde afstand
-    avg_distance = np.mean(distances)
-    
-    # Bereken de standaarddeviatie van de afstanden
-    std_distance = np.std(distances)
-    
-    # Bereken de overlap score (lager is beter)
-    overlap_score = avg_distance / (img_shape[0] * 0.1)  # Normaliseer op basis van afbeeldingshoogte
-    
-    # Bereken de consistentie score (lager is beter)
-    consistency_score = std_distance / avg_distance if avg_distance > 0 else 1.0
-    
-    return 1.0 - min(1.0, (overlap_score + consistency_score) / 2.0)
-
-def find_good_matches(des1, des2, ratio_thresh=0.7):  # Aangepaste ratio threshold
-    """Verbeterde feature matching met ratio test en symmetrie check"""
-    if des1 is None or des2 is None or len(des1) == 0 or len(des2) == 0:
-        return []
-    
-    # Forward matching
-    bf = cv2.BFMatcher(cv2.NORM_HAMMING, crossCheck=False)
-    matches_forward = bf.knnMatch(des1, des2, k=2)
-    
-    # Backward matching
-    matches_backward = bf.knnMatch(des2, des1, k=2)
-    
-    # Pas ratio test toe op beide richtingen
-    good_matches_forward = []
-    for m, n in matches_forward:
-        if m.distance < ratio_thresh * n.distance:
-            good_matches_forward.append(m)
-    
-    good_matches_backward = []
-    for m, n in matches_backward:
-        if m.distance < ratio_thresh * n.distance:
-            good_matches_backward.append(m)
-    
-    # Symmetrie check
-    good_matches = []
-    for match in good_matches_forward:
-        # Zoek de corresponderende backward match
-        for back_match in good_matches_backward:
-            if match.queryIdx == back_match.trainIdx and match.trainIdx == back_match.queryIdx:
-                good_matches.append(match)
-                break
-    
-    return good_matches
-
-def verify_geometric_consistency(kp1, kp2, good_matches, img_shape, min_matches=8):  # Verminderd minimum matches
-    if len(good_matches) < min_matches:
-        return False, 0
-    
-    # Haal de coördinaten van de matches
-    src_pts = np.float32([kp1[m.queryIdx].pt for m in good_matches]).reshape(-1, 1, 2)
-    dst_pts = np.float32([kp2[m.trainIdx].pt for m in good_matches]).reshape(-1, 1, 2)
-    
-    # Bereken de homografie met RANSAC
-    H, mask = cv2.findHomography(src_pts, dst_pts, cv2.RANSAC, 3.0)  # Aangepaste RANSAC threshold
-    
-    if H is None:
-        return False, 0
-    
-    # Tel hoeveel inliers we hebben
-    inliers = np.sum(mask)
-    inlier_ratio = inliers / len(good_matches)
-    
-    # Bereken de overlap score
-    overlap_score = analyze_match_distribution(kp1, kp2, good_matches, img_shape)
-    
-    # Combineer inlier ratio en overlap score
-    final_score = (inlier_ratio * 0.6 + overlap_score * 0.4)
-    
-    return final_score > 0.3, final_score  # Aangepaste drempelwaarde
-
 def compare_images_v3(img1, img2):
-    """Vergelijk twee afbeeldingen met de originele versie van het algoritme"""
-    # Zorg ervoor dat beide afbeeldingen dezelfde grootte hebben
-    scale_percent = 100
-    width = int(img1.shape[1] * scale_percent / 100)
-    height = int(img1.shape[0] * scale_percent / 100)
-    dim = (width, height)
-    img1 = cv2.resize(img1, dim)
-    img2 = cv2.resize(img2, dim)
+    """Vergelijk twee afbeeldingen met de exacte schaalstrategie van original.py.
+       - Geen smart_resize.
+       - img2 wordt direct geschaald naar de originele dimensies van img1.
+       - ORB(8000), BFMatcher(crossCheck=True).
+       - Good match distance < 50.
+       - Match als confidence > 30%.
+    """
+    # Stap 1: Bepaal de dimensies van de originele img1
+    h, w = img1.shape[:2]
+    
+    # Stap 2: Schaal img2 naar de exacte dimensies van de originele img1
+    img1_final = img1 
+    img2_final = cv2.resize(img2, (w, h), interpolation=cv2.INTER_AREA)
 
-    # Gebruik ORB met originele parameters
-    orb = cv2.ORB_create(nfeatures=2000)
-    kp1, des1 = orb.detectAndCompute(img1, None)
-    kp2, des2 = orb.detectAndCompute(img2, None)
+    # Gebruik ORB met nfeatures=8000
+    orb = cv2.ORB_create(nfeatures=8000)
+    kp1, des1 = orb.detectAndCompute(img1_final, None)
+    kp2, des2 = orb.detectAndCompute(img2_final, None)
 
     if des1 is None or des2 is None or len(des1) == 0 or len(des2) == 0:
         return False, 0
 
-    # Gebruik de originele matching strategie
     bf = cv2.BFMatcher(cv2.NORM_HAMMING, crossCheck=True)
     matches = bf.match(des1, des2)
+    
     matches = sorted(matches, key=lambda x: x.distance)
+    
     good_matches = [m for m in matches if m.distance < 50]
-    confidence = min(100, int((len(good_matches) / len(matches)) * 100)) if matches else 0
+    
+    confidence = 0
+    if matches and len(matches) > 0:
+        confidence = min(100, int((len(good_matches) / len(matches)) * 100))
+    
+    is_match = confidence > 30
 
-    return confidence > 30, confidence
+    return is_match, confidence
 
 @app.route('/')
 def hello():
@@ -207,7 +69,6 @@ def compare_images():
         if 'image1' not in request.files or 'image2' not in request.files:
             return jsonify({'error': 'Beide afbeeldingen moeten worden meegegeven als image1 en image2'}), 400
 
-        # Controleer bestandsgrootte
         if request.files['image1'].content_length and request.files['image1'].content_length > 10 * 1024 * 1024:  # 10MB
             return jsonify({'error': 'Afbeelding 1 is te groot (max 10MB)'}), 400
         if request.files['image2'].content_length and request.files['image2'].content_length > 10 * 1024 * 1024:  # 10MB
@@ -220,31 +81,27 @@ def compare_images():
             request.files['image1'].save(tmp1.name)
             request.files['image2'].save(tmp2.name)
 
-            img1 = cv2.imread(tmp1.name, cv2.IMREAD_COLOR)
-            img2 = cv2.imread(tmp2.name, cv2.IMREAD_COLOR)
+            img1_read = cv2.imread(tmp1.name, cv2.IMREAD_COLOR)
+            img2_read = cv2.imread(tmp2.name, cv2.IMREAD_COLOR)
 
-            if img1 is None or img2 is None:
+            if img1_read is None or img2_read is None:
                 app.logger.error("Kon een van de afbeeldingen niet lezen")
                 return jsonify({'error': 'Kon een van de afbeeldingen niet lezen'}), 400
 
-            # Log afbeeldingsgrootte
-            app.logger.info(f"Image 1 size: {img1.shape}, Image 2 size: {img2.shape}")
+            app.logger.info(f"Image 1 (input) size: {img1_read.shape}, Image 2 (input) size: {img2_read.shape}")
 
-            # Vergelijk de afbeeldingen
-            match_v3, confidence = compare_images_v3(img1, img2)
+            match_v3, confidence_v3 = compare_images_v3(img1_read, img2_read)
             
-            # Converteer NumPy types naar Python native types
             result = {
                 "match": bool(match_v3),
-                "confidence": int(confidence),
-                "remarks": f"Match confidence: {confidence}%"
+                "confidence": int(confidence_v3),
+                "remarks": f"{sum(1 for m in good_matches if m.distance < 50)} goede matches gevonden. Confidence: {int(confidence_v3)}%"
             }
             
             app.logger.info(f"Successfully processed images. Result: {result}")
             return jsonify(result)
 
         finally:
-            # Cleanup
             try:
                 os.unlink(tmp1.name)
                 os.unlink(tmp2.name)
