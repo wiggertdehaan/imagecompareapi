@@ -42,7 +42,7 @@ def compare_images_v3(img1, img2):
     kp2, des2 = orb.detectAndCompute(img2_final, None)
 
     if des1 is None or des2 is None or len(des1) == 0 or len(des2) == 0:
-        return False, 0
+        return False, 0, 0
 
     bf = cv2.BFMatcher(cv2.NORM_HAMMING, crossCheck=True)
     matches = bf.match(des1, des2)
@@ -57,7 +57,7 @@ def compare_images_v3(img1, img2):
     
     is_match = confidence > 30
 
-    return is_match, confidence
+    return is_match, confidence, len(good_matches)
 
 @app.route('/')
 def hello():
@@ -90,12 +90,12 @@ def compare_images():
 
             app.logger.info(f"Image 1 (input) size: {img1_read.shape}, Image 2 (input) size: {img2_read.shape}")
 
-            match_v3, confidence_v3 = compare_images_v3(img1_read, img2_read)
+            match_v3, confidence_v3, num_good_matches = compare_images_v3(img1_read, img2_read)
             
             result = {
                 "match": bool(match_v3),
                 "confidence": int(confidence_v3),
-                "remarks": f"{sum(1 for m in good_matches if m.distance < 50)} goede matches gevonden. Confidence: {int(confidence_v3)}%"
+                "remarks": f"{num_good_matches} goede matches gevonden. Confidence: {int(confidence_v3)}%"
             }
             
             app.logger.info(f"Successfully processed images. Result: {result}")
